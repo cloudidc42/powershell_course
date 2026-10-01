@@ -1,226 +1,226 @@
-# Part 28: Jobs, Scheduling และ Background Tasks
+# Part 28: Scheduled Tasks และ Automation
 
-> **ระดับ**: 🟠 Advanced | **เวลา**: ~4 ชั่วขนึง
-
----
-
-## 1. Background Jobs
-
-```powershell
-# Start-Job: สร้าง PowerShell process ใหม่
-$job = Start-Job -ScriptBlock {
-    param($url)
-    $result = Invoke-WebRequest $url
-    return $result.StatusCode
-} -ArgumentList 'https://example.com'
-
-# ดูสถานะ
-Get-Job
-Get-Job $job.Id
-$job.State    # Running, Completed, Failed
-
-# รอให้เสร็จ
-Wait-Job $job
-Wait-Job $job -Timeout 30  # max 30 sec
-
-# รับผลลัพธ์
-$result = Receive-Job $job
-Write-Host "Status: $result"
-
-Receive-Job $job -Wait          # รอ + รับ
-Receive-Job $job -AutoRemoveJob # remove เมื่อเสร็จ
-
-# ลบ
-$job | Remove-Job
-
-# Parallel jobs
-$servers = @('server1','server2','server3','server4','server5')
-$jobs = $servers | ForEach-Object {
-    Start-Job { param($s); Test-Connection $s -Count 1 -Quiet } -ArgumentList $_
-}
-
-$jobs | Wait-Job | ForEach-Object {
-    $result = Receive-Job $_
-    Write-Host "$($_.Name): $result"
-}
-$jobs | Remove-Job
-```
+> **ระดับ**: 🟠 Advanced | **เวลา**: ~3 ชั่วขนึ่ง
 
 ---
 
-## 2. Thread Jobs (PS7+)
+## 1. Task Scheduler
 
 ```powershell
-# Thread jobs: เบากว่ากว่า Start-Job (ไม่สร้าง process ใหม่)
-Install-Module ThreadJob -Scope CurrentUser
+# สร้าง Scheduled Task
+$action = New-ScheduledTaskAction \
+    -Execute 'pwsh.exe' \
+    -Argument '-NonInteractive -File C:\Scripts\backup.ps1' \
+    -WorkingDirectory 'C:\Scripts'
 
-$job = Start-ThreadJob {
-    Start-Sleep 2
-    return "Hello from thread!"
-}
-
-$result = $job | Wait-Job | Receive-Job
-Write-Host $result
-
-# Parallel dengan ForEach-Object -Parallel (PS7+)
-$urls = @(
-    'https://httpbin.org/delay/1'
-    'https://httpbin.org/delay/2'
-    'https://httpbin.org/delay/1'
-)
-
-$results = $urls | ForEach-Object -Parallel {
-    $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    try {
-        Invoke-WebRequest $_ -TimeoutSec 10 | Out-Null
-        [PSCustomObject]@{ Url=$_; Status='OK'; Ms=$sw.ElapsedMilliseconds }
-    } catch {
-        [PSCustomObject]@{ Url=$_; Status='FAIL'; Ms=$sw.ElapsedMilliseconds }
-    }
-} -ThrottleLimit 3
-
-$results | Format-Table -AutoSize
-Write-Host "Total wall time: ~2s (parallel)" -ForegroundColor Green
-```
-
----
-
-## 3. Scheduled Jobs
-
-```powershell
-# Register-ScheduledJob: PowerShell-aware Task Scheduler
-$trigger = New-JobTrigger -Daily -At '3:00 AM'
-
-$options = New-ScheduledJobOption \
-    -RunElevated \
-    -MultipleInstancePolicy StopExisting
-
-$job = Register-ScheduledJob \
-    -Name 'DailyBackup' \
-    -Trigger $trigger \
-    -ScheduledJobOption $options \
-    -ScriptBlock {
-        $date = Get-Date -Format 'yyyy-MM-dd'
-        $dest = "C:\Backups\backup_$date.zip"
-        
-        # compress and backup
-        Compress-Archive -Path 'C:\Data' -DestinationPath $dest -CompressionLevel Optimal
-        
-        # log
-        "[$date] Backup complete: $dest" | Add-Content 'C:\Logs\backup.log'
-    }
-
-# ดู registered jobs
-Get-ScheduledJob
-Get-ScheduledJob 'DailyBackup'
-
-# เรียกใช้ทันที
-$trigger2 = New-JobTrigger -Once -At (Get-Date).AddMinutes(1)
-Register-ScheduledJob -Name 'OneTime' -Trigger $trigger2 -ScriptBlock { 'Done!' }
-
-# เอาผลลัพธ์
-Get-Job -Name 'DailyBackup' | Receive-Job
-
-# ลบ
-Unregister-ScheduledJob 'OneTime'
-```
-
----
-
-## 4. Windows Task Scheduler
-
-```powershell
-# จัดการ Windows Scheduled Tasks
-$action  = New-ScheduledTaskAction -Execute 'pwsh.exe' \
-    -Argument '-NonInteractive -WindowStyle Hidden -File "C:\Scripts\backup.ps1"'
-
-$trigger = New-ScheduledTaskTrigger -Daily -At '2:30 AM'
+$trigger = New-ScheduledTaskTrigger \
+    -Daily -At '02:00AM'
 
 $settings = New-ScheduledTaskSettingsSet \
-    -ExecutionTimeLimit (New-TimeSpan -Hours 2) \
-    -RunOnlyIfNetworkAvailable:$false \
-    -WakeToRun:$false
+    -ExecutionTimeLimit (New-TimeSpan -Hours 1) \
+    -RestartCount 3 \
+    -RestartInterval (New-TimeSpan -Minutes 1) \
+    -RunOnlyIfNetworkAvailable \
+    -WakeToRun
 
 $principal = New-ScheduledTaskPrincipal \
-    -UserId 'SYSTEM' \
-    -LogonType ServiceAccount \
+    -UserId 'NT AUTHORITY\SYSTEM' \
     -RunLevel Highest
 
-$task = New-ScheduledTask \
+Register-ScheduledTask \
+    -TaskName 'DailyBackup' \
+    -TaskPath '\MyTasks\' \
     -Action $action \
     -Trigger $trigger \
     -Settings $settings \
     -Principal $principal \
-    -Description 'Daily backup script'
+    -Description 'Daily backup at 2 AM'
 
-Register-ScheduledTask -TaskName 'DailyPSBackup' -TaskPath '\Custom\' -InputObject $task
+# Manage tasks
+Get-ScheduledTask -TaskPath '\MyTasks\'
+Get-ScheduledTask -TaskName 'DailyBackup' | Get-ScheduledTaskInfo
 
-# จัดการ
-Get-ScheduledTask -TaskPath '\Custom\'
-Start-ScheduledTask -TaskName 'DailyPSBackup'  # run now
-Stop-ScheduledTask  -TaskName 'DailyPSBackup'
-Enable-ScheduledTask  -TaskName 'DailyPSBackup'
-Disable-ScheduledTask -TaskName 'DailyPSBackup'
-Unregister-ScheduledTask -TaskName 'DailyPSBackup' -Confirm:$false
+Start-ScheduledTask  -TaskName 'DailyBackup'
+Stop-ScheduledTask   -TaskName 'DailyBackup'
+Enable-ScheduledTask -TaskName 'DailyBackup'
+Disable-ScheduledTask -TaskName 'DailyBackup'
+Unregister-ScheduledTask -TaskName 'DailyBackup' -Confirm:$false
 ```
 
 ---
 
-## 5. Runspaces (Ultimate Performance)
+## 2. เพิ่มเติม Triggers
 
 ```powershell
-# Runspaces: เร็วที่สุด (ใช้ thread pool)
-function Invoke-Parallel {
-    param(
-        [array]$Items,
-        [scriptblock]$ScriptBlock,
-        [int]$ThrottleLimit = 10,
-        [hashtable]$Variables = @{}
-    )
-    
-    $pool = [System.Management.Automation.Runspaces.RunspacePool]::CreateRunspacePool(
-        1, $ThrottleLimit
-    )
-    $pool.Open()
-    
-    $jobs = $Items | ForEach-Object {
-        $ps = [System.Management.Automation.PowerShell]::Create()
-        $ps.RunspacePool = $pool
-        $ps.AddScript($ScriptBlock) | Out-Null
-        $ps.AddArgument($_) | Out-Null
-        
-        foreach ($var in $Variables.GetEnumerator()) {
-            $ps.AddVariable($var.Key, $var.Value) | Out-Null
-        }
-        
-        @{ PS = $ps; Handle = $ps.BeginInvoke() }
-    }
-    
-    $results = $jobs | ForEach-Object {
-        $_.PS.EndInvoke($_.Handle)
-        $_.PS.Dispose()
-    }
-    
-    $pool.Close()
-    $pool.Dispose()
-    
-    return $results
+# Trigger หลายส์
+# Daily
+$daily = New-ScheduledTaskTrigger -Daily -At '06:00'
+
+# Weekly
+$weekly = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Monday,Wednesday,Friday -At '08:00'
+
+# Monthly
+$monthly = New-ScheduledTaskTrigger -Monthly -DaysOfMonth 1 -At '00:00'
+
+# At startup
+$startup = New-ScheduledTaskTrigger -AtStartup
+
+# At logon
+$logon = New-ScheduledTaskTrigger -AtLogOn -User 'DOMAIN\Alice'
+
+# Once
+$once = New-ScheduledTaskTrigger -Once -At (Get-Date).AddHours(1)
+
+# Repeat within trigger
+$repeat = New-ScheduledTaskTrigger -Daily -At '00:00'
+$repeat.Repetition = (
+    New-Object Microsoft.Management.Infrastructure.CimInstance 'MSFT_TaskRepetitionPattern',
+    'Root/Microsoft/Windows/TaskScheduler'
+)
+# เรียกทุก 15 นาที
+# Set-ScheduledTask แบบเต็มถ้วย COM interface
+
+# Event trigger
+$eventTrigger = New-ScheduledTaskTrigger `
+    -OnEvent `
+    -Log 'Application' `
+    -Source 'Application Error' `
+    -EventId 1000
+```
+
+---
+
+## 3. Automation Scripts
+
+```powershell
+# backup.ps1 - สําหรับใช้เป็น scheduled task
+#Requires -Version 5.1
+
+param(
+    [string]$SourcePath  = 'C:\Data',
+    [string]$BackupRoot  = 'D:\Backups',
+    [int]   $KeepDays    = 30,
+    [string]$LogFile     = 'C:\Logs\backup.log'
+)
+
+function Write-Log {
+    param([string]$Message, [string]$Level = 'INFO')
+    $ts   = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+    $line = "[$ts] [$Level] $Message"
+    $line | Add-Content $LogFile
+    Write-Host $line
 }
 
-# Usage: scan 254 hosts in parallel
-$sw = [System.Diagnostics.Stopwatch]::StartNew()
-
-$online = Invoke-Parallel (1..254) {
-    param($i)
-    $ip = "192.168.1.$i"
-    if (Test-Connection $ip -Count 1 -Quiet -TimeoutSeconds 1) {
-        [PSCustomObject]@{ IP=$ip; Status='Online' }
+try {
+    $datestamp = Get-Date -Format 'yyyy-MM-dd_HHmmss'
+    $dest      = Join-Path $BackupRoot $datestamp
+    
+    Write-Log "Starting backup: $SourcePath -> $dest"
+    New-Item $dest -ItemType Directory -Force | Out-Null
+    
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    Copy-Item $SourcePath -Destination $dest -Recurse -Force
+    $sw.Stop()
+    
+    $size = (Get-ChildItem $dest -Recurse | Measure-Object Length -Sum).Sum
+    Write-Log "Backup complete: $([math]::Round($size/1MB,1))MB in $($sw.Elapsed.TotalSeconds)s"
+    
+    # Cleanup old backups
+    $cutoff = (Get-Date).AddDays(-$KeepDays)
+    $old = Get-ChildItem $BackupRoot -Directory | Where-Object { $_.CreationTime -lt $cutoff }
+    foreach ($dir in $old) {
+        Write-Log "Removing old backup: $($dir.Name)"
+        Remove-Item $dir.FullName -Recurse -Force
     }
-} -ThrottleLimit 50
+    
+    Write-Log "Done. Removed $($old.Count) old backups."
+    exit 0
+} catch {
+    Write-Log "BACKUP FAILED: $_" 'ERROR'
+    exit 1
+}
+```
 
-$sw.Stop()
-Write-Host "Scanned 254 hosts in $($sw.Elapsed.TotalSeconds)s"
-$online | Format-Table
+---
+
+## 4. Self-Healing Script
+
+```powershell
+# monitor.ps1 - รันทุก 5 นาที ตรวจสอบ service
+
+$services = @('W3SVC', 'MSSQLSERVER', 'WSearch')
+
+function Ensure-ServiceRunning {
+    param([string]$ServiceName)
+    
+    $svc = Get-Service $ServiceName -ErrorAction SilentlyContinue
+    if (!$svc) {
+        Write-EventLog -LogName Application -Source 'ServiceMonitor' \
+            -EventId 9001 -EntryType Error \
+            -Message "Service '$ServiceName' not found"
+        return
+    }
+    
+    if ($svc.Status -ne 'Running') {
+        Write-Host "$ServiceName is $($svc.Status), restarting..."
+        Start-Service $ServiceName
+        Start-Sleep 3
+        
+        $svc.Refresh()
+        if ($svc.Status -eq 'Running') {
+            Write-Host "$ServiceName restarted OK"
+        } else {
+            Write-Error "$ServiceName failed to restart!"
+            # ส่งแจ้ง email/Teams/Slack
+        }
+    }
+}
+
+# Register event source ถ้ายังไม่มี
+if (![System.Diagnostics.EventLog]::SourceExists('ServiceMonitor')) {
+    New-EventLog -LogName Application -Source 'ServiceMonitor'
+}
+
+$services | ForEach-Object { Ensure-ServiceRunning $_ }
+```
+
+---
+
+## 5. Windows Service (สร้าง service เอง)
+
+```powershell
+# ติดตั้ง NSSM (Non-Sucking Service Manager) หรือ
+# ใช้ New-Service cmdlet
+
+# PowerShell script เป็น Windows Service
+# sc.exe create MyPSService binpath="pwsh -NonInteractive -File C:\Services\myservice.ps1"
+
+# สร้างด้วย New-Service
+New-Service `
+    -Name 'MyMonitorService' `
+    -BinaryPathName 'pwsh -NonInteractive -ExecutionPolicy Bypass -File C:\Services\monitor.ps1' `
+    -DisplayName 'My Monitor Service' `
+    -Description 'PowerShell monitoring service' `
+    -StartupType Automatic
+
+# จัดการ
+ Start-Service MyMonitorService
+Get-Service MyMonitorService
+Stop-Service MyMonitorService
+Remove-Service MyMonitorService  # PS 6.0+
+
+# myservice.ps1 - ลูปเป็น service
+while ($true) {
+    try {
+        # ทำงาน
+        Get-Process | Where-Object { $_.CPU -gt 90 } | ForEach-Object {
+            Write-EventLog -LogName Application -Source 'MyService' \
+                -EventId 1001 -EntryType Warning \
+                -Message "High CPU: $($_.Name) = $($_.CPU)%"
+        }
+    } catch { }
+    Start-Sleep 60
+}
 ```
 
 ---

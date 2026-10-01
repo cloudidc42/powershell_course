@@ -1,202 +1,239 @@
-# Part 27: DSC - Desired State Configuration
+# Part 27: Desired State Configuration (DSC)
 
-> **ระดับ**: 🟠 Advanced | **เวลา**: ~4 ชั่วโมง
+> **ระดับ**: 🟠 Advanced | **เวลา**: ~4 ชั่วขนึ่ง
 
 ---
 
-## 1. DSC คืออะไร
+## 1. DSC คืออะไร?
+
+DSC (Desired State Configuration) = การกำหนด "state" ที่ต้องการของเครื่อง Windows และให้ระบบจัดการให้มันตรงตามนั้นเอง
 
 ```powershell
-# DSC = "ระบบควบคุมว่า server ต้องอยู่ในสถานะที่ต้องการ"
-# เหมือน Infrastructure as Code
-
-# Configuration = function ที่คำนวณ MOF file
-Configuration WebServerSetup {
-    param(
+# ตัวอย่าง DSC Configuration พื้นฐาน
+configuration WebServerSetup {
+    
+    param (
         [string[]]$ComputerName = 'localhost'
     )
     
-    # Import resources
     Import-DscResource -ModuleName PSDesiredStateConfiguration
-    Import-DscResource -ModuleName xWebAdministration  # Install-Module xWebAdministration
     
     Node $ComputerName {
-        # ติดตั้ง Windows features
-        WindowsFeature WebServer {
+        
+        # ติดตั้ง IIS
+        WindowsFeature IIS {
             Name   = 'Web-Server'
-            Ensure = 'Present'  # Absent = remove
+            Ensure = 'Present'    # ต้องมี
         }
         
-        WindowsFeature WebAsp {
+        WindowsFeature ASP {
             Name      = 'Web-Asp-Net45'
             Ensure    = 'Present'
-            DependsOn = '[WindowsFeature]WebServer'
+            DependsOn = '[WindowsFeature]IIS'
         }
         
-        # สร้าง directory
-        File WebRoot {
-            DestinationPath = 'C:\inetpub\myapp'
-            Type            = 'Directory'
+        # ทำให้สะอาด
+        File DefaultSite {
+            DestinationPath = 'C:\inetpub\wwwroot\index.html'
+            Contents        = '<h1>Hello from DSC!</h1>'
+            Type            = 'File'
             Ensure          = 'Present'
+            DependsOn       = '[WindowsFeature]IIS'
         }
         
-        # เขียน config file
-        File AppConfig {
-            DestinationPath = 'C:\inetpub\myapp\web.config'
-            Contents        = @'
-<?xml version="1.0"?>
-<configuration>
-  <system.webServer></system.webServer>
-</configuration>
-'@
-            Ensure    = 'Present'
-            DependsOn = '[File]WebRoot'
-        }
-        
-        # Service management
-        Service Spooler {
-            Name        = 'Spooler'
+        # Service running
+        Service W3SVC {
+            Name        = 'W3SVC'
             State       = 'Running'
             StartupType = 'Automatic'
+            DependsOn   = '[WindowsFeature]IIS'
         }
         
         # Registry
-        Registry MaxConnections {
-            Key       = 'HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters'
-            ValueName = 'TcpNumConnections'
-            ValueData = '16777214'
-            ValueType = 'DWord'
+        Registry DisableAutorun {
+            Key       = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\policies\Explorer'
+            ValueName = 'NoDriveTypeAutoRun'
+            ValueData = '255'
+            ValueType = 'Dword'
             Ensure    = 'Present'
         }
     }
 }
-```
 
----
-
-## 2. ใช้ DSC
-
-```powershell
-# 1. สร้าง MOF file
+# Compile เป็น MOF file
 WebServerSetup -ComputerName 'WebServer01'
-# สร้างไฟล์: .\WebServerSetup\WebServer01.mof
+# Creates: WebServerSetup\WebServer01.mof
 
-# 2. Apply configuration (Push mode)
+# Apply
 Start-DscConfiguration -Path '.\WebServerSetup' -Wait -Verbose
 
-# Push ไปยัง remote server
-Start-DscConfiguration -Path '.\WebServerSetup' \
-    -ComputerName 'WebServer01' \
-    -Credential (Get-Credential) \
-    -Wait -Verbose
+# Test current state
+Test-DscConfiguration -Path '.\WebServerSetup' -Verbose
 
-# 3. ตรวจสอบสถานะ
+# Get current state
 Get-DscConfiguration
-Get-DscConfigurationStatus
-
-# Test: จริงไหม?
-Test-DscConfiguration
-Test-DscConfiguration -ComputerName 'WebServer01'
-
-# 4. Restoreน configuration ถ้าเปลี่ยนไป
-Restore-DscConfiguration
 ```
 
 ---
 
-## 3. Custom DSC Resource
+## 2. Custom DSC Resource
 
 ```powershell
-# สร้าง custom resource ด้วย class
+# DSC Resource module: MyApp/DSCResources/MyApp_WebApp/MyApp_WebApp.psm1
 
-[DscResource()]
-class HostsFileEntry {
-    [DscProperty(Key)]
-    [string]$Hostname
+function Get-TargetResource {
+    param (
+        [Parameter(Mandatory)] [string]$Name,
+        [string]$Port = '80',
+        [string]$Path = 'C:\inetpub\apps'
+    )
     
-    [DscProperty(Mandatory)]
-    [string]$IPAddress
+    $appPath = Join-Path $Path $Name
+    $exists  = Test-Path $appPath
     
-    [DscProperty()]
-    [string]$Ensure = 'Present'
-    
-    [DscProperty()]
-    [string]$Comment = ''
-    
-    hidden [string]$HostsFile = 'C:\Windows\System32\drivers\etc\hosts'
-    
-    [void] Set() {
-        $lines = Get-Content $this.HostsFile
-        $pattern = "^[^#]*\s+$([regex]::Escape($this.Hostname))\s*$"
-        
-        if ($this.Ensure -eq 'Present') {
-            $entry = "$($this.IPAddress)    $($this.Hostname)"
-            if ($this.Comment) { $entry += "    # $($this.Comment)" }
-            
-            # Remove existing, add new
-            $newLines = $lines | Where-Object { $_ -notmatch $pattern }
-            $newLines + $entry | Set-Content $this.HostsFile
-        } else {
-            $lines | Where-Object { $_ -notmatch $pattern } | Set-Content $this.HostsFile
-        }
-    }
-    
-    [bool] Test() {
-        $lines = Get-Content $this.HostsFile
-        $pattern = "^\s*$([regex]::Escape($this.IPAddress))\s+$([regex]::Escape($this.Hostname))"
-        $exists  = $lines | Where-Object { $_ -match $pattern }
-        
-        if ($this.Ensure -eq 'Present') { return [bool]$exists }
-        else { return ![bool]$exists }
-    }
-    
-    [HostsFileEntry] Get() {
-        $result = [HostsFileEntry]::new()
-        $result.Hostname = $this.Hostname
-        $lines   = Get-Content $this.HostsFile
-        $pattern = "\s+$([regex]::Escape($this.Hostname))\s*$"
-        $line    = $lines | Where-Object { $_ -match $pattern } | Select-Object -First 1
-        
-        if ($line) {
-            $result.IPAddress = ($line -split '\s+')[0]
-            $result.Ensure   = 'Present'
-        } else {
-            $result.IPAddress = ''
-            $result.Ensure   = 'Absent'
-        }
-        return $result
+    return @{
+        Name    = $Name
+        Port    = $Port
+        Path    = $appPath
+        Ensure  = if ($exists) { 'Present' } else { 'Absent' }
     }
 }
+
+function Test-TargetResource {
+    param (
+        [Parameter(Mandatory)] [string]$Name,
+        [string]$Port = '80',
+        [string]$Path = 'C:\inetpub\apps',
+        [ValidateSet('Present','Absent')]
+        [string]$Ensure = 'Present'
+    )
+    
+    $current = Get-TargetResource @PSBoundParameters
+    return $current.Ensure -eq $Ensure
+}
+
+function Set-TargetResource {
+    param (
+        [Parameter(Mandatory)] [string]$Name,
+        [string]$Port = '80',
+        [string]$Path = 'C:\inetpub\apps',
+        [ValidateSet('Present','Absent')]
+        [string]$Ensure = 'Present'
+    )
+    
+    $appPath = Join-Path $Path $Name
+    
+    if ($Ensure -eq 'Present') {
+        if (!(Test-Path $appPath)) {
+            New-Item $appPath -ItemType Directory -Force
+            Write-Verbose "Created app directory: $appPath"
+        }
+        # Configure IIS application
+    } else {
+        if (Test-Path $appPath) {
+            Remove-Item $appPath -Recurse -Force
+            Write-Verbose "Removed app: $Name"
+        }
+    }
+}
+
+Export-ModuleMember -Function *-TargetResource
 ```
 
 ---
 
-## 4. LCM Configuration
+## 3. Configuration Data
 
 ```powershell
-# Local Configuration Manager
+# Separate config data from configuration
+$configData = @{
+    AllNodes = @(
+        @{
+            NodeName = 'WebServer01'
+            Role     = 'Web'
+            Site     = 'MainSite'
+        },
+        @{
+            NodeName = 'DbServer01'
+            Role     = 'Database'
+        },
+        @{
+            NodeName = '*'  # applies to all
+            PSDscAllowPlainTextPassword = $false
+        }
+    )
+    NonNodeData = @{
+        AppVersion = '2.1.0'
+        LogPath    = 'D:\Logs'
+    }
+}
+
+configuration AppDeployment {
+    param ([hashtable]$ConfigData)
+    
+    Import-DscResource -ModuleName PSDesiredStateConfiguration
+    
+    Node $AllNodes.Where({$_.Role -eq 'Web'}).NodeName {
+        
+        File AppFiles {
+            SourcePath      = '\\fileserver\app'
+            DestinationPath = 'C:\App'
+            Recurse         = $true
+            Ensure          = 'Present'
+        }
+        
+        Script UpdateAppVersion {
+            GetScript  = { return @{Result = Get-Content 'C:\App\version.txt' -ErrorAction SilentlyContinue} }
+            TestScript = { 
+                $ver = Get-Content 'C:\App\version.txt' -ErrorAction SilentlyContinue
+                $ver -eq $using:ConfigData.NonNodeData.AppVersion
+            }
+            SetScript  = {
+                $using:ConfigData.NonNodeData.AppVersion | Set-Content 'C:\App\version.txt'
+            }
+        }
+    }
+}
+
+AppDeployment -ConfigData $configData
+```
+
+---
+
+## 4. LCM (Local Configuration Manager)
+
+```powershell
+# ตั้งค่า LCM
 [DSCLocalConfigurationManager()]
-Configuration LcmSettings {
-    Node 'localhost' {
+configuration LCMConfig {
+    
+    Node localhost {
         Settings {
-            RefreshMode           = 'Push'     # Push or Pull
-            ConfigurationMode    = 'ApplyAndAutoCorrect'  # Apply, ApplyAndMonitor
-            RebootNodeIfNeeded    = $false
-            ActionAfterReboot     = 'ContinueConfiguration'
-            AllowModuleOverwrite  = $true
-            
-            # Pull mode settings
-            # RefreshFrequencyMins     = 30
-            # ConfigurationModeFrequencyMins = 15
+            RefreshMode          = 'Pull'     # Pull หรือ Push
+            ConfigurationMode    = 'ApplyAndAutoCorrect'
+            RebootNodeIfNeeded   = $true
+            RefreshFrequencyMins = 30
+            AllowModuleOverwrite = $true
+        }
+        
+        ConfigurationRepositoryWeb PullServer {
+            ServerURL          = 'https://pullserver.example.com/PSDSCPullServer.svc'
+            RegistrationKey    = '7c43e9f2-e7a4-4b6d-a235-c8a6b8c7d9f1'
+            ConfigurationNames = @('WebServerSetup')
         }
     }
 }
 
-LcmSettings
-Set-DscLocalConfigurationManager -Path '.\LcmSettings' -Verbose
-Get-DscLocalConfigurationManager   # view current LCM
+LCMConfig
+Set-DscLocalConfigurationManager -Path '.\LCMConfig' -Verbose
+
+# Check LCM status
+Get-DscLocalConfigurationManager | Select-Object RefreshMode, ConfigurationMode, LCMState
+
+# Force apply
+Update-DscConfiguration -Wait -Verbose
 ```
 
 ---
 
-**ก่อนหน้า ← [Part 26](Part-26.md) | ต่อไป → [Part 28: Jobs & Scheduling](Part-28.md)**
+**ก่อนหน้า ← [Part 26](Part-26.md) | ต่อไป → [Part 28: Scheduled Tasks](Part-28.md)**
